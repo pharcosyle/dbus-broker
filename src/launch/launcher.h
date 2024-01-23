@@ -22,6 +22,12 @@ enum {
         LAUNCHER_E_INVALID_SERVICE_FILE,
 };
 
+enum {
+        LAUNCHER_SCOPE_NONE,
+        LAUNCHER_SCOPE_USER,
+        LAUNCHER_SCOPE_SYSTEM,
+};
+
 struct Launcher {
         sd_event *event;
         sd_bus *bus_controller;
@@ -29,7 +35,7 @@ struct Launcher {
         Log log;
         int fd_listen;
         bool audit;
-        bool user_scope;
+        int scope;
         char *configfile;
         Dirwatch *dirwatch;
         sd_event_source *dirwatch_src;
@@ -44,7 +50,7 @@ struct Launcher {
         bool at_console;
 };
 
-int launcher_new(Launcher **launcherp, int listen_fd, bool audit, const char *configfile, bool user_scope);
+int launcher_new(Launcher **launcherp, int listen_fd, bool audit, const char *configfile, int scope);
 Launcher *launcher_free(Launcher *launcher);
 
 C_DEFINE_CLEANUP(Launcher *, launcher_free);

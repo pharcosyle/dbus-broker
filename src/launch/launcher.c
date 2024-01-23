@@ -188,7 +188,7 @@ static int launcher_open_log(Launcher *launcher) {
         return 0;
 }
 
-int launcher_new(Launcher **launcherp, int fd_listen, bool audit, const char *configfile, bool user_scope) {
+int launcher_new(Launcher **launcherp, int fd_listen, bool audit, const char *configfile, int scope) {
         _c_cleanup_(launcher_freep) Launcher *launcher = NULL;
         int r;
 
@@ -201,7 +201,7 @@ int launcher_new(Launcher **launcherp, int fd_listen, bool audit, const char *co
         launcher->uid = -1;
         launcher->gid = -1;
         launcher->audit = audit;
-        launcher->user_scope = user_scope;
+        launcher->scope = scope;
 
         if (configfile)
                 launcher->configfile = strdup(configfile);
@@ -440,6 +440,14 @@ static int launcher_on_set_activation_environment(Launcher *launcher, sd_bus_mes
         _c_cleanup_(sd_bus_message_unrefp) sd_bus_message *method_call = NULL;
         int r;
 
+        if (launcher->scope == LAUNCHER_SCOPE_NONE)
+                /*
+                 * systemd activation is not supported, so we simply ignore
+                 * changes to the activation environment. This is what
+                 * dbus-daemon does too.
+                 */
+                return 0;
+
         r = sd_bus_message_new_method_call(launcher->bus_regular, &method_call,
                                            "org.freedesktop.systemd1",
                                            "/org/freedesktop/systemd1",
@@ -601,6 +609,11 @@ static int launcher_load_service_file(Launcher *launcher, const char *path, cons
         uid_t uid;
         int r;
 
+        if (launcher->scope == LAUNCHER_SCOPE_NONE) {
+                fprintf(stderr, "Ignoring the service directory '%s', as name activation is not supported.\n", path);
+                return 0;
+        }
+
         r = launcher_ini_reader_parse_file(launcher, &group, path);
         if (r)
                 return error_trace(r);
@@ -633,7 +646,7 @@ static int launcher_load_service_file(Launcher *launcher, const char *path, cons
 
                 return LAUNCHER_E_INVALID_SERVICE_FILE;
         } else if (n_name != n_basename || strncmp(name, basename, n_name) != 0) {
-                if (launcher->user_scope) {
+                if (launcher->scope == LAUNCHER_SCOPE_USER) {
                         log_append_here(&launcher->log, LOG_WARNING, 0, DBUS_BROKER_CATALOG_SERVICE_INVALID);
                         log_append_service_path(&launcher->log, path);
                         log_append_service_name(&launcher->log, name);
@@ -643,7 +656,7 @@ static int launcher_load_service_file(Launcher *launcher, const char *path, cons
                                 return error_fold(r);
 
                         /* For backwards compatibilty, we do not fail in the user-scope. */
-                } else {
+                } else if (launcher->scope == LAUNCHER_SCOPE_SYSTEM) {
                         log_append_here(&launcher->log, LOG_ERR, 0, DBUS_BROKER_CATALOG_SERVICE_INVALID);
                         log_append_service_path(&launcher->log, path);
                         log_append_service_name(&launcher->log, name);
@@ -743,6 +756,11 @@ static int launcher_load_service_dir(Launcher *launcher, const char *dirpath, NS
         char *path;
         size_t i, n;
         int r;
+
+        if (launcher->scope == LAUNCHER_SCOPE_NONE) {
+                fprintf(stderr, "Ignoring the service directory '%s', as name activation is not supported.\n", dirpath);
+                return 0;
+        }
 
         dir = opendir(dirpath);
         if (!dir) {
@@ -1006,16 +1024,18 @@ static int launcher_parse_config(Launcher *launcher, ConfigRoot **rootp, NSSCach
         ConfigNode *cnode;
         int r;
 
+        if (launcher->configfile)
+                configfile = launcher->configfile;
+        else if (launcher->scope == LAUNCHER_SCOPE_USER)
+                configfile = "/usr/share/dbus-1/session.conf";
+        else if (launcher->scope == LAUNCHER_SCOPE_SYSTEM)
+                configfile = "/usr/share/dbus-1/system.conf";
+        else
+                return 0;
+
         r = dirwatch_new(&dirwatch);
         if (r)
                 return error_fold(r);
-
-        if (launcher->configfile)
-                configfile = launcher->configfile;
-        else if (launcher->user_scope)
-                configfile = "/usr/share/dbus-1/session.conf";
-        else
-                configfile = "/usr/share/dbus-1/system.conf";
 
         config_parser_init(&parser);
 
@@ -1247,12 +1267,21 @@ static int launcher_connect(Launcher *launcher) {
 
         c_assert(!launcher->bus_regular);
 
-        if (launcher->user_scope) {
+        if (launcher->scope == LAUNCHER_SCOPE_USER) {
                 r = sd_bus_open_user(&launcher->bus_regular);
                 if (r < 0)
                         return error_origin(r);
-        } else {
+        } else if (launcher->scope == LAUNCHER_SCOPE_SYSTEM) {
                 r = sd_bus_open_system(&launcher->bus_regular);
+                if (r < 0)
+                        return error_origin(r);
+        } else {
+                /*
+                 * This is just a dummy object, which should not be used for
+                 * anything other than making sure we get more helpful error
+                 * messages in case we inadvertently use it.
+                 */
+                r = sd_bus_new(&launcher->bus_regular);
                 if (r < 0)
                         return error_origin(r);
         }
